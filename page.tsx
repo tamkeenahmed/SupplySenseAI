@@ -1,251 +1,119 @@
 "use client";
 import { useState, useEffect } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import {
-  ShieldCheck, BookOpen, FlaskConical, Database, ChevronRight,
-  Menu, Download, CheckCircle2, AlertTriangle, Info, Layers,
+  Zap, Package, TrendingDown, AlertTriangle, RotateCcw,
+  DollarSign, BarChart3, ShoppingCart, Upload, Bell, Menu,
+  FileDown, CheckCircle2, RefreshCw, UserCircle, X, ShieldCheck, Settings,
 } from "lucide-react";
+import { ThemeSwitcher } from "@/components/ThemeSwitcher";
 import { Sidebar } from "@/components/dashboard/Sidebar";
+import { KPICard } from "@/components/dashboard/KPICard";
+import { HealthScoreCard } from "@/components/dashboard/HealthScoreCard";
+import { RiskChart } from "@/components/dashboard/RiskChart";
+import { ABCChart } from "@/components/dashboard/ABCChart";
+import { TopRiskTable } from "@/components/dashboard/TopRiskTable";
+import { AgingDashboard } from "@/components/dashboard/AgingDashboard";
+import { DataCompletenessAdvisor } from "@/components/dashboard/DataCompletenessAdvisor";
+import { DemoBanner, DemoWelcomeToast } from "@/components/demo/DemoBanner";
 import { TrustBadge } from "@/components/validation/TrustBadge";
 import { ScoreBreakdown } from "@/components/validation/ScoreBreakdown";
-import { formatCurrency, cn } from "@/lib/utils";
-import { KPI_DEFINITIONS, type KPIKey } from "@/lib/kpi-definitions";
-import {
-  buildLiveCalculation,
-  getDataLineage,
-  buildValidationExport,
-} from "@/lib/validation-engine";
+import { formatCurrency, getHealthColor, getHealthLabel } from "@/lib/utils";
+import { isDemoMode, hasSessionData, clearSession } from "@/lib/demo-loader";
+import { MODE_LABELS, MODE_DESCRIPTIONS } from "@/lib/analysis-detector";
+import { computeCompleteness } from "@/lib/data-completeness";
 import type { DashboardMetrics } from "@/lib/types";
 import type { ActivePolicy } from "@/lib/policy";
 
-// ── KPI catalogue (what we show in the formula library) ──────────────────────
-const KPI_CATALOGUE: Array<{
-  key: KPIKey;
-  label: string;
-  valueFrom: (m: DashboardMetrics) => string;
-  color: string;
-}> = [
-  { key: "health_score",        label: "Health Score",          valueFrom: (m) => `${m.health_score}/100`,                             color: "text-blue-400" },
-  { key: "inventory_value",     label: "Inventory Value",       valueFrom: (m) => formatCurrency(m.total_inventory_value, true),       color: "text-white" },
-  { key: "dead_stock",          label: "Dead Stock",            valueFrom: (m) => `${m.dead_stock_count} SKUs · ${formatCurrency(m.dead_stock_value, true)}`, color: "text-red-400" },
-  { key: "slow_moving",         label: "Slow Moving",           valueFrom: (m) => `${m.slow_mover_count} SKUs · ${formatCurrency(m.slow_mover_value, true)}`, color: "text-amber-400" },
-  { key: "stockout_risk",       label: "Stockout Risk",         valueFrom: (m) => `${m.stockout_risk_count} at risk`,                  color: "text-orange-400" },
-  { key: "abc_analysis",        label: "ABC Analysis",          valueFrom: (m) => `A:${m.abc_summary.a_count} B:${m.abc_summary.b_count} C:${m.abc_summary.c_count}`, color: "text-emerald-400" },
-  { key: "recoverable_capital", label: "Recoverable Capital",   valueFrom: (m) => formatCurrency(m.recoverable_capital, true),         color: "text-purple-400" },
-  { key: "turnover_ratio",      label: "Turnover Ratio",        valueFrom: (m) => `${m.turnover_ratio.toFixed(2)}×`,                   color: "text-cyan-400" },
-  { key: "reorder_count",       label: "Reorder Count",         valueFrom: (m) => `${m.reorder_count} items`,                         color: "text-rose-400" },
-];
+// Inline demo loader button used in the no-data gate screen
+function NoDataDemoButton() {
+  const [loading, setLoading] = useState(false);
+  const router = useRouter();
+  const handleClick = async () => {
+    setLoading(true);
+    const { loadDemoIntoSession } = await import("@/lib/demo-loader");
+    loadDemoIntoSession();
+    router.push("/dashboard");
+  };
+  return (
+    <button onClick={handleClick} disabled={loading}
+      className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-white/5 hover:bg-white/8 text-slate-300 text-sm border border-white/8 transition-colors disabled:opacity-60">
+      {loading
+        ? <><RefreshCw className="w-3.5 h-3.5 animate-spin" />Loading demo…</>
+        : <>Start Demo Mode</>
+      }
+    </button>
+  );
+}
 
-// ── Active KPI panel ─────────────────────────────────────────────────────────
-function KPIValidationPanel({
-  kpiKey,
-  metrics,
-  detectedFields,
-  activePolicy,
-}: {
-  kpiKey: KPIKey;
-  metrics: DashboardMetrics;
-  detectedFields: string[];
-  activePolicy: ActivePolicy | null;
-}) {
-  const [tab, setTab] = useState<"calc" | "fields" | "lineage">("calc");
-  const def = KPI_DEFINITIONS[kpiKey];
-  const calc = buildLiveCalculation(kpiKey, metrics);
-  const lineage = getDataLineage(kpiKey, detectedFields, activePolicy);
+function exportPOCsv(recs: DashboardMetrics["reorder_recommendations"]) {
+  const header = "SKU,Product Name,Supplier,ABC Class,Order Qty (EOQ),Reorder Point,Days Until Stockout,Urgency,Unit Cost,Est. Order Value";
+  const rows = recs.map((r) =>
+    [r.sku_id, `"${r.product_name}"`, `"${r.supplier_name}"`, r.abc_class,
+     r.eoq, r.rop, isFinite(r.days_until_stockout) ? r.days_until_stockout : "—",
+     r.urgency.replace(/_/g, " "), r.unit_cost.toFixed(2), (r.eoq * r.unit_cost).toFixed(2)
+    ].join(",")
+  );
+  const csv = [header, ...rows].join("\n");
+  const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `SupplySense-PO-Draft-${new Date().toISOString().split("T")[0]}.csv`;
+  document.body.appendChild(a); a.click();
+  document.body.removeChild(a); URL.revokeObjectURL(url);
+}
 
-  if (!def) return null;
+function ReorderList({ metrics }: { metrics: DashboardMetrics }) {
+  const recs = metrics.reorder_recommendations.slice(0, 6);
+
+  const URGENCY = {
+    immediate: { bg: "bg-red-500/15", text: "text-red-300", border: "border-red-500/20", label: "Now" },
+    this_week: { bg: "bg-amber-500/15", text: "text-amber-300", border: "border-amber-500/20", label: "This week" },
+    this_month: { bg: "bg-blue-500/15", text: "text-blue-300", border: "border-blue-500/20", label: "This month" },
+  };
 
   return (
-    <div className="rounded-xl border border-[#6366f1]/25 overflow-hidden" style={{ background: "#0a1628" }}>
-      {/* KPI header */}
-      <div className="flex items-start justify-between gap-3 px-5 py-4 border-b border-white/6">
+    <div className="card overflow-hidden">
+      <div className="flex items-center justify-between px-5 py-4 border-b border-white/5">
         <div>
-          <p className="text-[10px] font-semibold text-[#818cf8] uppercase tracking-widest mb-0.5">Live Validation</p>
-          <h3 className="text-sm font-bold text-white" style={{ fontFamily: "Syne, sans-serif" }}>{def.title}</h3>
-          <p className="text-xs text-slate-500 mt-0.5">{def.tagline}</p>
+          <h3 className="text-sm font-semibold text-white">Reorder recommendations</h3>
+          <p className="text-[11px] text-slate-500 mt-0.5">EOQ-optimized · 95% service level</p>
         </div>
-        <Link
-          href={`/dashboard/kpi/${kpiKey}`}
-          target="_blank"
-          className="flex items-center gap-1 text-[11px] text-[#818cf8] hover:text-white transition-colors flex-shrink-0 mt-0.5"
+        <button
+          onClick={() => exportPOCsv(metrics.reorder_recommendations)}
+          disabled={metrics.reorder_recommendations.length === 0}
+          className="inline-flex items-center gap-1.5 text-xs text-[#818cf8] hover:text-white transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
         >
-          Full page <ChevronRight className="w-3 h-3" />
-        </Link>
+          <ShoppingCart className="w-3.5 h-3.5" />
+          Export PO draft
+        </button>
       </div>
 
-      {/* Meta row */}
-      <div className="flex items-center gap-4 px-5 py-2.5 bg-white/2 border-b border-white/5 text-[10px] text-slate-500">
-        <span><span className="text-slate-400 font-medium">{calc.totalRecords}</span> total records</span>
-        <span><span className="text-slate-400 font-medium">{calc.includedRecords}</span> included in this KPI</span>
-        <span className="flex items-center gap-1 text-emerald-500">
-          <CheckCircle2 className="w-3 h-3" /> Verified
-        </span>
-      </div>
-
-      {/* Tab bar */}
-      <div className="flex items-center gap-0.5 px-5 pt-3 border-b border-white/5">
-        {([
-          { id: "calc",    label: "Live Calculation", Icon: FlaskConical },
-          { id: "fields",  label: "Formula",           Icon: BookOpen },
-          { id: "lineage", label: "Data Lineage",      Icon: Database },
-        ] as const).map(({ id, label, Icon }) => (
-          <button
-            key={id}
-            onClick={() => setTab(id)}
-            className={cn(
-              "flex items-center gap-1.5 px-3 py-2 text-xs font-medium rounded-t-lg border-b-2 -mb-px transition-colors",
-              tab === id
-                ? "text-[#818cf8] border-[#6366f1] bg-[#6366f1]/8"
-                : "text-slate-500 border-transparent hover:text-slate-300"
-            )}
-          >
-            <Icon className="w-3 h-3" />
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Tab content */}
-      <div className="p-5 space-y-3">
-
-        {/* Live Calculation tab */}
-        {tab === "calc" && (
-          <>
-            <p className="text-xs text-slate-500">{calc.summary}</p>
-            <div className="space-y-2">
-              {calc.steps.map((step, i) => {
-                if (step.isHeader) {
-                  return (
-                    <p key={i} className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider pt-2">
-                      {step.label}
-                    </p>
-                  );
-                }
-                return (
-                  <div
-                    key={i}
-                    className={cn(
-                      "rounded-lg px-3.5 py-2.5 border",
-                      step.isFinal
-                        ? "bg-[#6366f1]/10 border-[#6366f1]/25"
-                        : "bg-white/2 border-white/5"
-                    )}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="flex-1 min-w-0">
-                        <p className={cn("text-xs font-medium", step.isFinal ? "text-white" : "text-slate-300")}>
-                          {step.label}
-                        </p>
-                        {step.expr && (
-                          <pre className="text-[10px] font-mono text-emerald-300 mt-1 leading-relaxed whitespace-pre-wrap break-all">
-                            {step.expr}
-                          </pre>
-                        )}
-                        {step.detail && (
-                          <p className="text-[10px] text-slate-600 mt-1">{step.detail}</p>
-                        )}
-                      </div>
-                      {step.value && (
-                        <span className={cn(
-                          "text-xs font-bold tabular-nums flex-shrink-0",
-                          step.isFinal ? "text-[#818cf8] text-sm" : "text-white"
-                        )}>
-                          {step.value}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </>
-        )}
-
-        {/* Formula tab */}
-        {tab === "fields" && (
-          <div className="space-y-3">
-            <p className="text-xs text-slate-500">{def.definition}</p>
-            <div className="space-y-2">
-              {def.formula.map((step, i) => (
-                <div key={i} className="space-y-1.5">
-                  <div className="flex items-center gap-2">
-                    <div className="w-5 h-5 rounded-full bg-[#6366f1]/20 flex items-center justify-center flex-shrink-0">
-                      <span className="text-[9px] font-bold text-[#818cf8]">{i + 1}</span>
-                    </div>
-                    <span className="text-[11px] font-medium text-slate-400">{step.label}</span>
-                  </div>
-                  <div className="ml-7 p-3 rounded-lg bg-[#020617] border border-white/8 font-mono text-xs text-emerald-300 leading-relaxed whitespace-pre-wrap">
-                    {step.expr}
-                  </div>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {/* Data Lineage tab */}
-        {tab === "lineage" && (
-          <div className="space-y-4">
-            {/* Source */}
-            <div className="flex items-center gap-2.5 p-3 rounded-lg bg-white/3 border border-white/5">
-              <Database className="w-3.5 h-3.5 text-[#818cf8]" />
-              <div>
-                <p className="text-xs font-medium text-white">Source: {lineage.source}</p>
-                <p className="text-[10px] text-slate-500 mt-0.5">
-                  No external data sources used
-                </p>
+      <div className="divide-y divide-white/4">
+        {recs.map((rec) => {
+          const u = URGENCY[rec.urgency];
+          return (
+            <div key={rec.sku_id} className="flex items-center gap-3 px-5 py-3 hover:bg-white/2 transition-colors">
+              <span className={`badge border ${u.bg} ${u.text} ${u.border} shrink-0`}>{u.label}</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs font-medium text-white truncate">{rec.product_name}</div>
+                <div className="text-[11px] text-slate-500">{rec.sku_id} · {rec.supplier_name}</div>
               </div>
-            </div>
-
-            {/* Fields */}
-            <div>
-              <p className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider mb-2">Columns used</p>
-              <div className="space-y-1.5">
-                {lineage.fields.map((f) => (
-                  <div key={f.columnName} className="flex items-center gap-2.5 px-3 py-2 rounded-lg bg-white/2 border border-white/5">
-                    <code className="text-[10px] font-mono text-[#818cf8] bg-[#6366f1]/10 px-1.5 py-0.5 rounded flex-shrink-0">
-                      {f.columnName}
-                    </code>
-                    <span className="text-xs text-slate-400 flex-1">{f.role}</span>
-                    <span className={cn(
-                      "text-[9px] font-semibold px-1.5 py-0.5 rounded border flex-shrink-0",
-                      f.required ? "text-red-400 bg-red-500/8 border-red-500/20" : "text-slate-600 bg-white/4 border-white/8"
-                    )}>
-                      {f.required ? "required" : "optional"}
-                    </span>
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* Policy */}
-            {lineage.policyFields.length > 0 && (
-              <div>
-                <p className="text-[10px] font-semibold text-slate-600 uppercase tracking-wider mb-2">
-                  Analysis policy thresholds used
-                </p>
-                <div className="space-y-1.5">
-                  {lineage.policyFields.map((pf) => (
-                    <div key={pf.field} className="flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-white/2 border border-white/5">
-                      <span className="text-xs text-slate-400">{pf.field}</span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-xs font-semibold text-white tabular-nums">{pf.value}{String(pf.value).includes("%") ? "" : " days"}</span>
-                        <span className={cn(
-                          "text-[9px] font-medium px-1.5 py-0.5 rounded-full border",
-                          pf.source === "file"   ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
-                          pf.source === "user"   ? "text-purple-400 bg-purple-500/10 border-purple-500/20" :
-                                                   "text-slate-500 bg-white/4 border-white/8"
-                        )}>
-                          {pf.source}
-                        </span>
-                      </div>
-                    </div>
-                  ))}
+              <div className="text-right shrink-0">
+                <div className="text-xs font-medium text-white">EOQ {rec.eoq} units</div>
+                <div className="text-[11px] text-slate-500">
+                  {isFinite(rec.days_until_stockout) ? `${rec.days_until_stockout}d left` : "—"}
                 </div>
               </div>
-            )}
-
-            <p className="text-[10px] text-slate-600 leading-relaxed">{lineage.trustStatement}</p>
+            </div>
+          );
+        })}
+        {recs.length === 0 && (
+          <div className="px-5 py-6 text-center">
+            <CheckCircle2 className="w-5 h-5 text-emerald-400 mx-auto mb-2" />
+            <p className="text-xs text-slate-500">No critical reorders needed right now</p>
           </div>
         )}
       </div>
@@ -253,231 +121,543 @@ function KPIValidationPanel({
   );
 }
 
-// ── Page ─────────────────────────────────────────────────────────────────────
-
-export default function ValidationPage() {
+export default function DashboardPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const [metrics, setMetrics]         = useState<DashboardMetrics | null>(null);
+  const [bellOpen, setBellOpen] = useState(false);
+  const [metrics, setMetrics] = useState<DashboardMetrics | null>(null);
+  const [filename, setFilename] = useState("");
+  const [rowCount, setRowCount] = useState(0);
+  const [isDemo, setIsDemo] = useState(false);
+  const [noData, setNoData] = useState(false);
   const [detectedFields, setDetectedFields] = useState<string[]>([]);
   const [activePolicy, setActivePolicy] = useState<ActivePolicy | null>(null);
-  const [filename, setFilename]        = useState("Inventory dataset");
-  const [activeKpi, setActiveKpi]      = useState<KPIKey>("health_score");
+
+  // Bump this any time the analyzer logic changes so stale sessionStorage
+  // is automatically invalidated and the user is prompted to re-upload.
+  const METRICS_VERSION = "4";
 
   useEffect(() => {
+    if (typeof window === "undefined") return;
     try {
-      const s  = sessionStorage.getItem("supplysense_metrics");
-      const fn = sessionStorage.getItem("supplysense_filename");
-      const fl = sessionStorage.getItem("supplysense_fields");
-      const sp = sessionStorage.getItem("supplysense_policy");
-      if (s) {
-        const m: DashboardMetrics = JSON.parse(s);
-        setMetrics(m);
-        if (fn) setFilename(fn);
-        if (fl) setDetectedFields(JSON.parse(fl));
-        if (m.active_policy) setActivePolicy(m.active_policy);
-        else if (sp) { try { setActivePolicy(JSON.parse(sp)); } catch { /* ignore */ } }
+      const storedVersion = sessionStorage.getItem("supplysense_metrics_version");
+      // If version doesn't match, wipe old metrics so stale numbers aren't shown
+      if (storedVersion !== METRICS_VERSION) {
+        sessionStorage.removeItem("supplysense_metrics");
+        sessionStorage.removeItem("supplysense_filename");
+        sessionStorage.removeItem("supplysense_rows");
+        sessionStorage.removeItem("supplysense_fields");
+        sessionStorage.removeItem("supplysense_metrics_version");
+        setNoData(true);
+        return;
       }
-    } catch { /* ignore */ }
+      const stored   = sessionStorage.getItem("supplysense_metrics");
+      const storedFn = sessionStorage.getItem("supplysense_filename");
+      const storedRw = sessionStorage.getItem("supplysense_rows");
+      const storedFl = sessionStorage.getItem("supplysense_fields");
+      if (stored) {
+        const parsedMetrics: DashboardMetrics = JSON.parse(stored);
+        setMetrics(parsedMetrics);
+        setFilename(storedFn ?? "Uploaded file");
+        setRowCount(parseInt(storedRw ?? "0", 10));
+        setIsDemo(isDemoMode());
+        setDetectedFields(storedFl ? JSON.parse(storedFl) : []);
+        // Load active policy — prefer metrics.active_policy, fall back to session
+        if (parsedMetrics.active_policy) {
+          setActivePolicy(parsedMetrics.active_policy);
+        } else {
+          const storedPolicy = sessionStorage.getItem("supplysense_policy");
+          if (storedPolicy) {
+            try { setActivePolicy(JSON.parse(storedPolicy)); } catch { /* ignore */ }
+          }
+        }
+        return;
+      }
+    } catch { /* corrupt storage */ }
+    // No data at all — signal redirect state
+    setNoData(true);
   }, []);
 
-  function handleExport() {
-    if (!metrics) return;
-    const content = buildValidationExport(metrics, filename, detectedFields);
-    const blob = new Blob([content], { type: "text/plain;charset=utf-8;" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `SupplySense-Validation-Report-${new Date().toISOString().split("T")[0]}.txt`;
-    document.body.appendChild(a); a.click();
-    document.body.removeChild(a); URL.revokeObjectURL(url);
+  // No session data → prompt to upload or start demo
+  if (noData) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#020617] px-4">
+        <div className="card p-8 max-w-sm w-full text-center space-y-5">
+          <div className="w-12 h-12 rounded-2xl bg-[#6366f1]/15 border border-[#6366f1]/25 flex items-center justify-center mx-auto">
+            <Upload className="w-5 h-5 text-[#818cf8]" />
+          </div>
+          <div>
+            <h2 className="text-base font-bold text-white mb-1.5" style={{ fontFamily: "Syne, sans-serif" }}>No data loaded yet</h2>
+            <p className="text-xs text-slate-500 leading-relaxed">Upload your inventory file for a live analysis, or start the interactive demo to explore the platform.</p>
+          </div>
+          <div className="flex flex-col gap-2">
+            <Link href="/upload"
+              className="inline-flex items-center justify-center gap-2 px-5 py-2.5 rounded-xl bg-[#6366f1] hover:bg-[#4f46e5] text-white text-sm font-medium transition-colors">
+              <Upload className="w-3.5 h-3.5" />
+              Upload your inventory
+            </Link>
+            <NoDataDemoButton />
+          </div>
+        </div>
+      </div>
+    );
   }
 
+  if (!metrics) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-[#020617]">
+        <div className="flex flex-col items-center gap-3">
+          <RefreshCw className="w-6 h-6 text-[#818cf8] animate-spin" />
+          <span className="text-sm text-slate-500">Loading analysis…</span>
+        </div>
+      </div>
+    );
+  }
+
+  const mode = metrics.analysis_mode ?? "health";
+  const completeness = computeCompleteness(detectedFields);
+  const healthColor = getHealthColor(metrics.health_score);
+  const healthLabel = getHealthLabel(metrics.health_score);
+  const healthIconColor  = metrics.health_score >= 80 ? "text-emerald-400" : metrics.health_score >= 60 ? "text-blue-400" : metrics.health_score >= 40 ? "text-amber-400" : "text-red-400";
+  const healthValueColor = healthIconColor;
+  const aging = metrics.aging_metrics;
+
+  // ── Aging-specific KPI cards (Mode B) ───────────────────────────────────
+  const AGING_KPI_CARDS = [
+    {
+      label: "Ageing Health Score",
+      value: `${aging?.ageing_health_score ?? 0}/100`,
+      icon: Zap,
+      iconBg: "bg-white/5",
+      iconColor: (aging?.ageing_health_score ?? 0) >= 80 ? "text-emerald-400" : (aging?.ageing_health_score ?? 0) >= 60 ? "text-blue-400" : (aging?.ageing_health_score ?? 0) >= 40 ? "text-amber-400" : "text-red-400",
+      valueColor: (aging?.ageing_health_score ?? 0) >= 80 ? "text-emerald-400" : (aging?.ageing_health_score ?? 0) >= 60 ? "text-blue-400" : (aging?.ageing_health_score ?? 0) >= 40 ? "text-amber-400" : "text-red-400",
+      sub: "Based on ageing distribution",
+      kpiKey: "ageing_score" as const,
+    },
+    {
+      label: "Inventory Value",
+      value: formatCurrency(aging?.total_value ?? metrics.total_inventory_value, true),
+      icon: Package,
+      iconBg: "bg-white/5",
+      iconColor: "text-slate-400",
+      valueColor: "text-white",
+      sub: `${aging?.total_items ?? metrics.total_skus} items`,
+      kpiKey: "inventory_value" as const,
+    },
+    {
+      label: "Dead Stock Value",
+      value: formatCurrency(aging?.dead_stock_value ?? 0, true),
+      icon: TrendingDown,
+      iconBg: "bg-red-500/10",
+      iconColor: "text-red-400",
+      valueColor: "text-red-300",
+      sub: `${aging?.dead_stock_count ?? 0} items · 181+ days`,
+      kpiKey: "dead_stock" as const,
+    },
+    {
+      label: "Blocked Capital",
+      value: formatCurrency(aging?.blocked_capital ?? 0, true),
+      icon: DollarSign,
+      iconBg: "bg-orange-500/10",
+      iconColor: "text-orange-400",
+      valueColor: "text-orange-400",
+      sub: "Dead + slow moving stock",
+      kpiKey: "blocked_capital" as const,
+    },
+    {
+      label: "Avg Ageing Days",
+      value: `${aging?.avg_ageing_days ?? 0}d`,
+      icon: RotateCcw,
+      iconBg: "bg-blue-500/10",
+      iconColor: "text-blue-400",
+      valueColor: (aging?.avg_ageing_days ?? 0) <= 90 ? "text-emerald-400" : (aging?.avg_ageing_days ?? 0) <= 180 ? "text-amber-400" : "text-red-400",
+      sub: "Weighted by inventory value",
+      kpiKey: "avg_ageing_days" as const,
+    },
+    {
+      label: "Slow Moving Value",
+      value: formatCurrency(aging?.slow_moving_value ?? 0, true),
+      icon: AlertTriangle,
+      iconBg: "bg-amber-500/10",
+      iconColor: "text-amber-400",
+      valueColor: "text-amber-400",
+      sub: `${aging?.slow_moving_count ?? 0} items · 91–180 days`,
+      kpiKey: "slow_moving" as const,
+    },
+    {
+      label: "Fresh Stock",
+      value: `${aging?.buckets[0]?.pct_count ?? 0}%`,
+      icon: BarChart3,
+      iconBg: "bg-emerald-500/10",
+      iconColor: "text-emerald-400",
+      valueColor: "text-emerald-400",
+      sub: `${aging?.buckets[0]?.count ?? 0} items aged 0–30 days`,
+      kpiKey: undefined,
+    },
+    {
+      label: "Liquidation Items",
+      value: String(aging?.liquidation_opportunities.length ?? 0),
+      icon: ShoppingCart,
+      iconBg: "bg-purple-500/10",
+      iconColor: "text-purple-400",
+      valueColor: "text-purple-400",
+      sub: "Items ready to liquidate",
+      kpiKey: undefined,
+    },
+  ];
+
+  // ── Health KPI cards (Mode A) ────────────────────────────────────────────
+  const KPI_CARDS = [
+    {
+      label: "Health Score",
+      value: `${metrics.health_score}/100`,
+      icon: Zap,
+      iconBg: "bg-white/5",
+      iconColor: healthIconColor,
+      valueColor: healthValueColor,
+      sub: healthLabel,
+      kpiKey: "health_score" as const,
+    },
+    {
+      label: "Inventory Value",
+      value: formatCurrency(metrics.total_inventory_value, true),
+      icon: Package,
+      iconBg: "bg-white/5",
+      iconColor: "text-slate-400",
+      valueColor: "text-white",
+      sub: `${formatCurrency(metrics.annual_carrying_cost, true)}/yr carry`,
+      kpiKey: "inventory_value" as const,
+    },
+    {
+      label: "Dead Stock Value",
+      value: formatCurrency(metrics.dead_stock_value, true),
+      icon: TrendingDown,
+      iconBg: "bg-purple-500/10",
+      iconColor: "text-purple-400",
+      valueColor: "text-purple-300",
+      sub: `${metrics.dead_stock_count} SKUs · ${formatCurrency(metrics.dead_stock_carrying_cost, true)}/yr`,
+      kpiKey: "dead_stock" as const,
+    },
+    {
+      label: "Stockout Risk Count",
+      value: String(metrics.stockout_risk_count),
+      icon: AlertTriangle,
+      iconBg: "bg-red-500/10",
+      iconColor: "text-red-400",
+      valueColor: metrics.stockout_risk_count > 0 ? "text-red-400" : "text-emerald-400",
+      sub: `${metrics.critical_stockout_count} immediate · at/below reorder point`,
+      delta: metrics.critical_stockout_count > 0 ? `⚠ ${metrics.critical_stockout_count} urgent` : undefined,
+      kpiKey: "stockout_risk" as const,
+    },
+    {
+      label: "Slow Mover Value",
+      value: formatCurrency(metrics.slow_mover_value, true),
+      icon: RotateCcw,
+      iconBg: "bg-amber-500/10",
+      iconColor: "text-amber-400",
+      valueColor: "text-amber-400",
+      sub: `${metrics.slow_mover_count} SKUs slowing`,
+      kpiKey: "slow_moving" as const,
+    },
+    {
+      label: "Recoverable Capital",
+      value: formatCurrency(metrics.recoverable_capital, true),
+      icon: DollarSign,
+      iconBg: "bg-emerald-500/10",
+      iconColor: "text-emerald-400",
+      valueColor: "text-emerald-400",
+      sub: "Unlock via liquidation",
+      kpiKey: "recoverable_capital" as const,
+    },
+    {
+      label: "Turnover Ratio",
+      value: `${metrics.turnover_ratio}×`,
+      icon: BarChart3,
+      iconBg: "bg-blue-500/10",
+      iconColor: "text-blue-400",
+      valueColor: "text-blue-400",
+      sub: "4.5× US mfg benchmark",
+      kpiKey: "turnover_ratio" as const,
+    },
+    {
+      label: "Reorder Count",
+      value: String(metrics.reorder_count),
+      icon: ShoppingCart,
+      iconBg: "bg-orange-500/10",
+      iconColor: "text-orange-400",
+      valueColor: "text-orange-400",
+      sub: `${metrics.reorder_count === 1 ? "purchase order" : "purchase orders"} due`,
+      kpiKey: "reorder_count" as const,
+    },
+  ];
+
   return (
-    <div className="flex h-screen bg-[#020617] overflow-hidden">
+    <div className="flex h-screen bg-[#020617] ss-page overflow-hidden">
       <Sidebar open={sidebarOpen} onClose={() => setSidebarOpen(false)} />
 
+      {/* Main area */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         {/* Topbar */}
         <header className="nav-glass sticky top-0 z-30 flex-shrink-0">
           <div className="flex items-center h-[46px] px-4 gap-3">
-            <button onClick={() => setSidebarOpen(true)}
-              className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:bg-white/5 hover:text-white transition-colors">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open navigation menu"
+              className="lg:hidden p-1.5 rounded-lg text-slate-400 hover:bg-white/5 hover:text-white transition-colors"
+            >
               <Menu className="w-4 h-4" />
             </button>
-            <div className="flex items-center gap-2 flex-1">
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-              <span className="text-xs font-semibold text-white">Validation Mode</span>
-              <span className="text-xs text-slate-500 ml-1">— Audit, verify, and trace every calculation</span>
+
+            <div className="flex-1 min-w-0">
+              <span className="text-xs text-slate-500 truncate">
+                {isDemo ? "Demo dataset" : filename} · {metrics.total_skus} SKUs
+              </span>
             </div>
-            <button
-              onClick={handleExport}
-              disabled={!metrics}
-              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 border border-white/8 hover:border-white/16 hover:text-white transition-colors disabled:opacity-40"
-            >
-              <Download className="w-3 h-3" />
-              Export Validation Report
-            </button>
+
+            <div className="flex items-center gap-2 flex-shrink-0">
+              {isDemo && (
+                <div className="hidden sm:flex items-center gap-2">
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                    Demo mode
+                  </span>
+                  <Link href="/upload"
+                    onClick={() => { try { clearSession(); } catch {} }}
+                    className="text-[10px] text-slate-500 hover:text-white transition-colors underline underline-offset-2">
+                    Upload real data →
+                  </Link>
+                </div>
+              )}
+              <Link
+                href="/upload"
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-[#6366f1] hover:bg-[#4f46e5] text-white text-xs font-medium transition-colors"
+              >
+                <Upload className="w-3 h-3" />
+                New upload
+              </Link>
+              {/* Compact theme toggle */}
+              <div className="hidden sm:block">
+                <ThemeSwitcher variant="compact" />
+              </div>
+
+              {/* Bell with dropdown */}
+              <div className="relative">
+                <button
+                  aria-label={metrics.critical_stockout_count > 0 ? `${metrics.critical_stockout_count} critical alerts` : "Notifications"}
+                  onClick={() => setBellOpen((o) => !o)}
+                  className="relative p-1.5 rounded-lg text-slate-400 hover:bg-white/5 hover:text-white transition-colors"
+                >
+                  <Bell className="w-4 h-4" />
+                  {metrics.critical_stockout_count > 0 && (
+                    <span className="absolute top-0 right-0 w-2 h-2 rounded-full bg-red-500" aria-hidden="true" />
+                  )}
+                </button>
+                {bellOpen && (
+                  <div className="absolute right-0 top-9 w-72 card border border-white/10 shadow-2xl z-50 overflow-hidden">
+                    <div className="flex items-center justify-between px-4 py-3 border-b border-white/5">
+                      <span className="text-xs font-semibold text-white">Alerts</span>
+                      <button onClick={() => setBellOpen(false)} className="text-slate-500 hover:text-white transition-colors">
+                        <X className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                    <div className="max-h-64 overflow-y-auto divide-y divide-white/4">
+                      {metrics.top_risk_items.slice(0, 5).map((item) => (
+                        <div key={item.sku_id} className="px-4 py-2.5 hover:bg-white/2 transition-colors">
+                          <div className="flex items-start gap-2">
+                            <AlertTriangle className={`w-3 h-3 mt-0.5 flex-shrink-0 ${item.scenario === "CRITICAL" ? "text-red-400" : "text-amber-400"}`} />
+                            <div className="flex-1 min-w-0">
+                              <p className="text-[11px] font-medium text-white truncate">{item.product_name}</p>
+                              <p className="text-[10px] text-slate-500">
+                                {item.scenario === "CRITICAL"
+                                  ? `Stockout in ${isFinite(item.days_stock_remaining) ? Math.round(item.days_stock_remaining) : "—"}d`
+                                  : item.scenario === "DEAD" ? "Dead stock — no movement" : "Slow mover"}
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                      {metrics.critical_stockout_count === 0 && (
+                        <div className="px-4 py-4 text-center text-xs text-slate-500">No active alerts</div>
+                      )}
+                    </div>
+                    <div className="px-4 py-2.5 border-t border-white/5">
+                      <Link href="/dashboard/insights" onClick={() => setBellOpen(false)}
+                        className="text-[11px] text-[#818cf8] hover:text-white transition-colors">
+                        View full AI analysis →
+                      </Link>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* User avatar */}
+              <div className="w-7 h-7 rounded-full bg-[#6366f1]/20 flex items-center justify-center text-[#818cf8]">
+                <UserCircle className="w-5 h-5" />
+              </div>
+            </div>
           </div>
         </header>
 
+        {/* Scrollable content */}
         <main className="flex-1 overflow-y-auto">
-          <div className="max-w-[1100px] mx-auto px-4 py-6 space-y-6">
+          <div className="max-w-[1280px] mx-auto px-4 py-5 space-y-5">
 
-            {/* Trust banner */}
-            <TrustBadge variant="full" />
+            {/* Analysis mode banner */}
+            {mode !== "health" && (
+              <div className={`flex items-center gap-2 px-4 py-2.5 rounded-xl border ${
+                mode === "aging"    ? "bg-blue-500/8 border-blue-500/20" :
+                                     "bg-[#6366f1]/8 border-[#6366f1]/20"
+              }`}>
+                <div className={`w-1.5 h-1.5 rounded-full animate-pulse ${mode === "aging" ? "bg-blue-400" : "bg-[#818cf8]"}`} />
+                <span className={`text-xs font-medium ${mode === "aging" ? "text-blue-300" : "text-[#818cf8]"}`}>
+                  {MODE_LABELS[mode]}
+                </span>
+                <span className="text-[11px] text-slate-500 ml-1">{MODE_DESCRIPTIONS[mode]}</span>
+              </div>
+            )}
 
-            {/* Trust statement */}
-            <div className="flex items-start gap-3 p-4 rounded-xl bg-[#6366f1]/6 border border-[#6366f1]/15">
-              <Info className="w-4 h-4 text-[#818cf8] flex-shrink-0 mt-0.5" />
-              <p className="text-xs text-slate-400 leading-relaxed">
-                <span className="text-white font-semibold">All analytics are generated directly from your uploaded data</span> and can be independently verified through this Validation Mode.
-                Select any KPI below to see its live calculation, exact formula, source columns, and the specific records that contribute to each figure.
-                No estimates, benchmarks, or AI-generated assumptions are used unless explicitly stated.
+            {/* Policy badge */}
+            {activePolicy && (() => {
+              const p = activePolicy.policy;
+              const src = activePolicy.source;
+              const badgeStyles =
+                src === "file"   ? "bg-emerald-500/10 border-emerald-500/20 text-emerald-400" :
+                src === "user"   ? "bg-[#6366f1]/10 border-[#6366f1]/20 text-[#818cf8]" :
+                                   "bg-slate-500/10 border-slate-500/20 text-slate-400";
+              const srcLabel =
+                src === "file" ? "File Settings" :
+                src === "user" ? "User Preferences" :
+                                 "System Defaults";
+              const cPct = Math.max(0, 100 - p.abc_a_pct - p.abc_b_pct);
+              return (
+                <div className={`flex items-center gap-3 px-3 py-2 rounded-xl border text-[11px] flex-wrap ${badgeStyles}`}>
+                  <span className="font-semibold text-white/70">Analysis Policy</span>
+                  <span className="flex items-center gap-1">
+                    <ShieldCheck className="w-3 h-3" />
+                    {srcLabel}
+                  </span>
+                  <span className="text-white/40">·</span>
+                  <span className="text-white/60">
+                    Slow: {p.slow_moving_days}d · Dead: {p.dead_stock_days}d · Critical: {p.critical_coverage_days}d · ABC: {p.abc_a_pct}/{p.abc_b_pct}/{cPct}
+                  </span>
+                  <Link href="/settings" className="ml-auto flex items-center gap-1 text-[#818cf8] hover:text-white transition-colors flex-shrink-0">
+                    <Settings className="w-3 h-3" />
+                    Configure
+                  </Link>
+                </div>
+              );
+            })()}
+
+            {/* Critical alert banner */}
+            {metrics.critical_stockout_count > 0 && mode !== "aging" && (
+              <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-red-500/10 border border-red-500/20 animate-in">
+                <AlertTriangle className="w-3.5 h-3.5 text-red-400 flex-shrink-0" />
+                <span className="text-xs text-red-300">
+                  <strong className="font-medium">{metrics.critical_stockout_count} critical alert{metrics.critical_stockout_count > 1 ? "s" : ""}:</strong>
+                  {" "}
+                  {metrics.top_risk_items[0]?.product_name} stockout in {Math.floor(metrics.top_risk_items[0]?.days_stock_remaining ?? 0)} days
+                </span>
+                <Link href="/dashboard/insights" className="ml-auto text-xs text-red-400/70 hover:text-red-300 transition-colors whitespace-nowrap flex-shrink-0">
+                  View all →
+                </Link>
+              </div>
+            )}
+
+            {/* Page header */}
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h1 className="text-lg font-bold text-white" style={{ fontFamily: "Syne, sans-serif" }}>
+                  Inventory overview
+                </h1>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  {isDemo ? "Demo Company" : filename.replace(/\.\w+$/, "")} · {new Date().toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })} · {metrics.total_skus} SKUs
+                </p>
+              </div>
+              <div className="flex items-center gap-2 flex-shrink-0">
+                <TrustBadge variant="compact" />
+                <Link
+                  href="/dashboard/insights"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-[#818cf8] border border-[#6366f1]/25 bg-[#6366f1]/8 hover:bg-[#6366f1]/15 hover:text-white transition-colors"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  AI Insights
+                </Link>
+                <button className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs text-slate-400 border border-white/8 hover:border-white/16 hover:text-white transition-colors">
+                  <FileDown className="w-3.5 h-3.5" />
+                  Export
+                </button>
+              </div>
+            </div>
+
+            {/* KPI Grid — adapts to analysis mode */}
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {(mode === "aging" ? AGING_KPI_CARDS : KPI_CARDS).map((card, i) => (
+                <KPICard
+                  key={card.label}
+                  label={card.label}
+                  value={card.value}
+                  icon={card.icon}
+                  iconBg={card.iconBg}
+                  iconColor={card.iconColor}
+                  valueColor={card.valueColor}
+                  sub={card.sub}
+                  delta={"delta" in card ? (card.delta as string | undefined) : undefined}
+                  animDelay={i * 60}
+                  kpiKey={card.kpiKey}
+                  metrics={metrics}
+                />
+              ))}
+            </div>
+
+            {/* Transparency statement */}
+            <div className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-emerald-500/5 border border-emerald-500/15">
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
+              <p className="text-[11px] text-slate-500 flex-1">
+                <span className="text-emerald-400 font-medium">Transparent calculations.</span>
+                {" "}All calculations are based on your uploaded data and can be independently verified.
+                Hover any KPI card and click{" "}
+                <span className="text-[#818cf8] font-semibold">ⓘ</span>
+                {" "}to see the formula, fields used, and a worked example.
               </p>
             </div>
 
-            <div className="grid lg:grid-cols-[280px_1fr] gap-6">
-
-              {/* Left — KPI list */}
-              <div className="space-y-3">
-                {/* Health score breakdown card */}
-                {metrics && <ScoreBreakdown metrics={metrics} />}
-
-                {/* Active policy */}
-                {activePolicy && (
-                  <div className="rounded-xl border border-white/8 overflow-hidden" style={{ background: "#0f172a" }}>
-                    <div className="flex items-center gap-2 px-4 py-3 border-b border-white/5">
-                      <Layers className="w-3.5 h-3.5 text-[#818cf8]" />
-                      <span className="text-xs font-semibold text-white">Active Policy</span>
-                      <span className={cn(
-                        "ml-auto text-[10px] font-medium px-2 py-0.5 rounded-full border",
-                        activePolicy.source === "file"   ? "text-blue-400 bg-blue-500/10 border-blue-500/20" :
-                        activePolicy.source === "user"   ? "text-purple-400 bg-purple-500/10 border-purple-500/20" :
-                                                           "text-slate-500 bg-white/4 border-white/8"
-                      )}>
-                        {activePolicy.source}
-                      </span>
-                    </div>
-                    <div className="px-4 py-3 space-y-1.5">
-                      {([
-                        { label: "Dead stock threshold",   value: `${activePolicy.policy.dead_stock_days}d` },
-                        { label: "Slow moving threshold",  value: `${activePolicy.policy.slow_moving_days}d` },
-                        { label: "Safety stock",           value: `${activePolicy.policy.safety_stock_days}d` },
-                        { label: "Critical coverage",      value: `${activePolicy.policy.critical_coverage_days}d` },
-                        { label: "ABC A threshold",        value: `${activePolicy.policy.abc_a_pct}%` },
-                        { label: "ABC B threshold",        value: `${activePolicy.policy.abc_b_pct}%` },
-                      ]).map(({ label, value }) => (
-                        <div key={label} className="flex items-center justify-between">
-                          <span className="text-[11px] text-slate-500">{label}</span>
-                          <span className="text-[11px] font-semibold text-white tabular-nums">{value}</span>
-                        </div>
-                      ))}
-                    </div>
+            {/* ── Mode A / C: Health analysis charts ─────────────────────── */}
+            {mode !== "aging" && (
+              <>
+                {/* Charts row */}
+                <div className="grid grid-cols-1 lg:grid-cols-5 gap-4">
+                  <div className="lg:col-span-2 space-y-3">
+                    <HealthScoreCard metrics={metrics} />
+                    <ScoreBreakdown metrics={metrics} />
                   </div>
-                )}
-
-                {/* KPI selector */}
-                <div className="rounded-xl border border-white/8 overflow-hidden" style={{ background: "#0f172a" }}>
-                  <div className="px-4 py-3 border-b border-white/5">
-                    <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider">Formula Library</p>
-                  </div>
-                  <div className="divide-y divide-white/4">
-                    {KPI_CATALOGUE.map(({ key, label, valueFrom, color }) => (
-                      <button
-                        key={key}
-                        onClick={() => setActiveKpi(key)}
-                        className={cn(
-                          "w-full flex items-center justify-between gap-3 px-4 py-3 text-left transition-colors hover:bg-white/3",
-                          activeKpi === key && "bg-[#6366f1]/10 border-l-2 border-[#6366f1]"
-                        )}
-                      >
-                        <div className="flex-1 min-w-0">
-                          <p className="text-xs font-medium text-white truncate">{label}</p>
-                          {metrics && (
-                            <p className={cn("text-[10px] tabular-nums mt-0.5", color)}>
-                              {valueFrom(metrics)}
-                            </p>
-                          )}
-                        </div>
-                        <ChevronRight className={cn(
-                          "w-3.5 h-3.5 flex-shrink-0 transition-colors",
-                          activeKpi === key ? "text-[#818cf8]" : "text-slate-600"
-                        )} />
-                      </button>
-                    ))}
+                  <div className="lg:col-span-3">
+                    <RiskChart metrics={metrics} />
                   </div>
                 </div>
-              </div>
 
-              {/* Right — Live validation panel */}
-              <div>
-                {metrics ? (
-                  <KPIValidationPanel
-                    kpiKey={activeKpi}
-                    metrics={metrics}
-                    detectedFields={detectedFields}
-                    activePolicy={activePolicy}
-                  />
-                ) : (
-                  <div className="flex flex-col items-center justify-center h-64 rounded-xl border border-white/8 gap-4">
-                    <Database className="w-8 h-8 text-slate-600" />
-                    <div className="text-center">
-                      <p className="text-sm font-semibold text-white mb-1">No data loaded</p>
-                      <p className="text-xs text-slate-500">Upload an inventory file to see live validations</p>
-                    </div>
-                    <Link href="/upload"
-                      className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-[#6366f1] text-white text-xs font-medium hover:bg-[#4f46e5] transition-colors">
-                      Upload inventory
-                    </Link>
-                  </div>
-                )}
+                {/* ABC chart */}
+                <ABCChart metrics={metrics} />
 
-                {/* Data completeness */}
-                {metrics && detectedFields.length > 0 && (
-                  <div className="mt-4 rounded-xl border border-white/8 p-4" style={{ background: "#0f172a" }}>
-                    <div className="flex items-center gap-2 mb-3">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <span className="text-xs font-semibold text-white">Detected Columns</span>
-                      <span className="text-[10px] text-slate-500 ml-auto">{detectedFields.length} column types recognised</span>
-                    </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {detectedFields.map((f) => (
-                        <span key={f} className="text-[10px] text-emerald-400 bg-emerald-500/10 border border-emerald-500/20 px-2 py-0.5 rounded-full">
-                          {f}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                {/* Top Risk Table */}
+                <TopRiskTable items={metrics.top_risk_items} />
 
-                {/* Validation status checklist */}
-                <div className="mt-4 rounded-xl border border-white/8 p-4 space-y-2.5" style={{ background: "#0f172a" }}>
-                  <p className="text-[10px] font-semibold text-slate-500 uppercase tracking-wider mb-3">Validation Status</p>
-                  {[
-                    { label: "Calculations based on uploaded data only",   pass: true },
-                    { label: "No external data sources or estimates used", pass: true },
-                    { label: "Formula library fully documented",           pass: true },
-                    { label: "Active policy thresholds visible",           pass: !!activePolicy },
-                    { label: "Per-record supporting data available",       pass: !!metrics },
-                    { label: "Step-by-step calculations traceable",        pass: !!metrics },
-                    { label: "Export audit trail available",               pass: true },
-                  ].map(({ label, pass }) => (
-                    <div key={label} className="flex items-center gap-2.5">
-                      {pass
-                        ? <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400 flex-shrink-0" />
-                        : <AlertTriangle className="w-3.5 h-3.5 text-amber-400 flex-shrink-0" />
-                      }
-                      <span className={cn("text-xs", pass ? "text-slate-300" : "text-slate-500")}>
-                        {label}
-                      </span>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            </div>
+                {/* Reorder Recommendations */}
+                <ReorderList metrics={metrics} />
+              </>
+            )}
+
+            {/* ── Mode B / C: Aging analysis section ─────────────────────── */}
+            {(mode === "aging" || mode === "complete") && aging && (
+              <AgingDashboard aging={aging} metrics={metrics} />
+            )}
+
+            {/* ── Data Completeness Advisor ────────────────────────────────── */}
+            {!isDemo && detectedFields.length > 0 && (
+              <DataCompletenessAdvisor result={completeness} />
+            )}
           </div>
         </main>
       </div>
+      <DemoBanner />
+      <DemoWelcomeToast />
     </div>
   );
 }
